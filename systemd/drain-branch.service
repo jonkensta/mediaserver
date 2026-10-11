@@ -1,0 +1,37 @@
+[Unit]
+Description=Slowly drain retiring mergerfs branches onto the rest of the pool
+# Requisite, not Requires: a timer firing while the DAS is down (e.g. after a
+# thermal shutdown) must fail, not start mergerfs and power the DAS back on.
+Requisite=mergerfs.service
+# PartOf + After: stopping mergerfs (or mount-das) stops this first, so a
+# running rsync can never make the branch unmounts fail.
+PartOf=mergerfs.service
+After=mergerfs.service
+# Before: in a joint stop (DAS/thermal shutdown) mediaserver stops first, so
+# ExecStopPost sees it inactive and does not restart containers mid-shutdown.
+Before=mediaserver.service
+# Any failure - including Requisite failing before Python runs, or a
+# container not coming back in ExecStopPost - emails.
+OnFailure=drain-branch-failed.service
+
+[Service]
+Type=oneshot
+# Sources drain in order: /mnt/07 (smallest, hottest), then /mnt/04, /mnt/03.
+# --stop: every container that mounts /mnt/merged. Moving files under them
+# live can lose data, so the script stops them and refuses if any remain.
+# Do not start or reload mediaserver.service during the window: the script
+# detects containers coming back and aborts (rolling back the batch).
+ExecStart=/usr/local/bin/drain-branch /mnt/07 /mnt/04 /mnt/03 \
+  --execute --window 00:30-06:30 \
+  --stop deluge radarr sonarr bazarr jellyfin \
+  --notify jstarr@jstarr.me
+# Runs after success, failure and timeout alike; restarts only what the run
+# stopped, and only while mediaserver.service is active.
+ExecStopPost=/usr/local/bin/drain-branch --restore
+Nice=19
+IOSchedulingClass=idle
+# Backstop for a hung run (RuntimeMaxSec does not apply to oneshot units).
+# The script itself stops at the window's end, 06:30.
+TimeoutStartSec=6h15min
+# ExecStopPost may wait out a pending 120 s docker stop before restarting.
+TimeoutStopSec=5min

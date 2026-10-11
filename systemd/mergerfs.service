@@ -5,12 +5,16 @@ Requires=mount-das.service
 
 [Service]
 Type=simple
+# /mnt/03, /mnt/04, /mnt/07 are NC (no new files) while drain-branch empties
+# them. mspmfs is epmfs that falls back to the nearest parent directory that
+# exists on an RW branch, so a create under a folder that only lives on an NC
+# branch still succeeds instead of failing. Restore epmfs once they're gone.
 ExecStart=/usr/bin/mergerfs \
   -f \
   -o cache.files=partial \
   -o dropcacheonclose=true \
-  -o category.create=epmfs \
-  /mnt/00:/mnt/01:/mnt/02:/mnt/03:/mnt/04:/mnt/05:/mnt/07 \
+  -o category.create=mspmfs \
+  /mnt/00:/mnt/01:/mnt/02:/mnt/03=NC:/mnt/04=NC:/mnt/05:/mnt/07=NC \
   /mnt/merged
 # Wait for the mount to be live before dependants start; with Type=simple
 # systemd would otherwise consider the unit started the instant it forks.

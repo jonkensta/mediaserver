@@ -1,0 +1,6 @@
+[Unit]
+Description=Email drain-branch.service failures
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/drain-branch --mail-failure jstarr@jstarr.me

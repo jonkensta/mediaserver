@@ -1,0 +1,12 @@
+[Unit]
+Description=Drain retiring mergerfs branches on weekday nights
+
+[Timer]
+# 00:30 Mon-Fri: the nights after Sunday through Thursday. Friday and
+# Saturday nights are left alone.
+OnCalendar=Mon..Fri *-*-* 00:30:00
+# No catch-up run after a missed night: it would start outside the window.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

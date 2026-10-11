@@ -22,7 +22,10 @@ This repository contains configuration files and utilities for managing a Docker
    - Depends on `mount-das.service`
    - Merges the 7 branches (`/mnt/00`-`/mnt/05`, `/mnt/07`) into `/mnt/merged`
    - Uses `cache.files=partial` (critical for deluge's mmap usage)
-   - Category create policy: `epmfs` (existing path, most free space)
+   - Category create policy: `mspmfs` (existing path, most free space,
+     falling back to the nearest existing parent) while `/mnt/03`, `/mnt/04`
+     and `/mnt/07` are NC (no-create) for `drain-branch`; back to `epmfs`
+     once they are retired
    - `ExecStartPost` waits for `/mnt/merged` to actually be a mountpoint before
      dependants start
 
@@ -164,6 +167,27 @@ bin/mergerfs-hardlink-downloads --clean-tmp
 
 `--no-verify` restores the old size-only matching. Do not use it: two different
 files of identical size will silently overwrite each other.
+
+- `drain-branch` - Empties retiring branches onto the rest of the pool, slowly,
+  so disks can be pulled (currently `/mnt/07`, `/mnt/04`, `/mnt/03`: the three
+  hot 7200 rpm drives). Run by `drain-branch.timer` (00:30 Mon-Fri) through
+  `drain-branch.service`: 20 MiB/s, window 00:30-06:30, pauses rsync at 53°C.
+  Each run stops the five containers that mount `/mnt/merged` (deluge radarr
+  sonarr bazarr jellyfin) and `--restore` (ExecStopPost) restarts them -
+  moving files under live apps can lose data. Hardlink groups move together;
+  an unfinished batch is rolled back. Emails on branch empty / all done /
+  stuck / failure (`drain-branch-failed.service`).
+
+  Preconditions (enforced): sources set NC and `category.create=mspmfs` in
+  the live mergerfs. Do not start or reload `mediaserver.service` during the
+  window. If `/var/lib/drain-branch/needs-recovery` or
+  `/run/drain-branch.stopped` exists, a previous run needs attention: the
+  containers stay down and new runs refuse until it is resolved.
+
+  ```bash
+  bin/drain-branch /mnt/07 /mnt/04 /mnt/03 -v    # dry-run plan
+  journalctl -u drain-branch.service             # nightly progress
+  ```
 
 ## Key Configuration Points
 
@@ -373,7 +397,7 @@ docker compose up -d
 ## Important Constraints
 
 - **No parity**: Data can be re-downloaded, so no snapraid/parity drive is used
-- **Hardlinks enabled**: Radarr/sonarr use hardlinks. mergerfs uses `epmfs` (existing path, most free space) create policy so new files land on the same branch as their parent directory, making hardlinks work correctly across the pool.
+- **Hardlinks enabled**: Radarr/sonarr use hardlinks. mergerfs uses `epmfs` (existing path, most free space; `mspmfs` during the drain, see above) create policy so new files land on the same branch as their parent directory, making hardlinks work correctly across the pool.
 - **mergerfs cache setting**: Must keep `cache.files=partial` for deluge's mmap usage
 - **Mount failures are fatal**: `mount-das.service` no longer prefixes its mounts with `-`. A failed mount fails the unit so `Restart=on-failure` power-cycles the DAS, instead of leaving a silently degraded pool that looks healthy. Unmounts on stop are likewise gated: if one fails, the relay is not opened, so the DAS keeps power rather than being cut out from under a live filesystem.
 - **Start timeouts**: `TimeoutStartSec` is set explicitly on `mount-das.service` (300s) and `mediaserver.service` (1800s). The systemd default is 90s, which is shorter than the DAS spin-up budget and shorter than a large `docker compose pull`.

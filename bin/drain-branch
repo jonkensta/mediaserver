@@ -1,0 +1,977 @@
+#!/usr/bin/env python3
+"""Slowly drain retiring mergerfs branches onto the rest of the pool.
+
+Built for retiring disks gently: each run copies at a throttled rate inside
+a night window, stops the containers that use the pool for the duration,
+and pauses whenever a disk involved runs hot. A weekday-night timer
+(drain-branch.timer) finishes the job over a couple of weeks. Paths under
+/mnt/merged never change, so the applications do not notice files moving
+between branches.
+
+Usage:
+  drain-branch /mnt/07 /mnt/04 /mnt/03                      # dry-run plan
+  drain-branch /mnt/07 /mnt/04 /mnt/03 --execute --window 00:30-06:30 \\
+      --stop deluge radarr sonarr bazarr jellyfin --notify you@example.com
+
+Preconditions for --execute (all checked):
+- root (source trees are owned by media; rsync -a preserves ownership)
+- every source branch is NC (no-create) and category.create is mspmfs, so
+  nothing new lands on a retiring branch between runs. At runtime:
+    setfattr -n user.mergerfs.branches -v '/mnt/00=RW:...:/mnt/07=NC' \\
+      /mnt/merged/.mergerfs
+    setfattr -n user.mergerfs.category.create -v mspmfs /mnt/merged/.mergerfs
+- the current time is inside --window
+- after stopping the --stop containers, no running container bind-mounts
+  anything under /mnt. Moving files under live Deluge/Radarr/Sonarr can lose
+  writes, clobber new files and split hardlinks, so the move only ever runs
+  with them stopped. drain-branch.service restarts them afterwards, even on
+  failure.
+
+How each move stays safe:
+- Files are grouped by inode: every name of a hardlinked file moves in the
+  same rsync -aHAX run to the same destination, so links survive. A group
+  with a link outside the source branch's scanned tree is never touched.
+- Items (Movies/<x>, TV/<x>, Downloads/<x>) joined by hardlinks form one
+  component that goes to one destination: a branch already holding part of
+  it if one passes the checks, else the one with most free space.
+- A component is skipped (and reported) if any of its paths exists on a
+  branch other than the source and destination: copying it would change
+  which version mergerfs' ff search exposes.
+- An existing destination path is a conflict unless it is the same type and
+  identical: full byte comparison for regular files, same target for
+  symlinks. That case is what an interrupted earlier run leaves behind.
+- Components changed in the last --min-age-hours (mtime or ctime) wait.
+- After each batch: a no-op rsync verify pass must report no file changes,
+  the destination filesystem is synced, no container may have come back,
+  and every name of every inode must still match its scan (inode, size, ns
+  mtime, link count) with its destination names sharing one inode. Only
+  then are the scanned source names unlinked - never whole trees.
+- A batch that does not get that far (window end, error, SIGTERM from
+  systemd) has everything it created on the destination removed again, so
+  the apps never restart onto a half-published move.
+- Directories are removed only when empty and present on the destination.
+- Temperatures are checked before and every minute during each copy; at
+  --max-temp rsync is paused in place (SIGSTOP) and resumed once cool, so a
+  large file is never restarted from zero. Re-checking leftover destination
+  copies is throttled and temperature-guarded the same way.
+- The containers this run stopped are recorded in /run/drain-branch.stopped
+  and restarted by --restore (ExecStopPost), only if mediaserver.service is
+  still active; a container that fails to come back fails the unit.
+- rsync's temp files live in a hidden directory on the destination root,
+  so half-copied files never appear inside library folders.
+
+Failures (including a timer run that could not start) are emailed by
+drain-branch-failed.service via --mail-failure. The script itself emails
+when a branch becomes empty, when everything is drained, and when only
+skipped items are left (manual attention needed).
+"""
+
+import argparse
+import contextlib
+import datetime
+import errno
+import email.message
+import fcntl
+import filecmp
+import json
+import os
+import signal
+import smtplib
+import ssl
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+MERGED = "/mnt/merged"
+CONTROL = os.path.join(MERGED, ".mergerfs")
+TMP_DIR_NAME = ".drain-branch-tmp"
+SKIP_ROOT = {"lost+found", TMP_DIR_NAME}
+LOCK = "/run/lock/drain-branch.lock"
+STOPPED_STATE = "/run/drain-branch.stopped"  # containers to restore
+# Persistent (survives reboot): set when a rollback could not finish, so the
+# apps stay down and no new run starts until someone looks.
+NEEDS_RECOVERY = "/var/lib/drain-branch/needs-recovery"
+UNIT = "drain-branch.service"
+GIB = 2**30
+TEMP_POLL = 60          # seconds between temperature checks during a copy
+SMARTCTL_TIMEOUT = 60
+
+SMTP_HOST = "smtp.fastmail.com"
+SMTP_USER = "jstarr@jstarr.me"
+SMTP_PASSWORD_FILE = "/opt/mediaserver/authelia/smtp_password"
+SENDER = "drain-branch <authelia@jstarr.me>"
+
+
+def log(msg):
+    print(f"{datetime.datetime.now():%H:%M:%S} {msg}", flush=True)
+
+
+def fail(msg):
+    # Mail for failures comes from drain-branch-failed.service (OnFailure),
+    # which also covers runs that never reached Python.
+    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def walk_error(error):
+    # Complete enumeration is what makes the hardlink closure check sound.
+    fail(f"cannot read {error.filename}: {error}")
+
+
+def gib(n):
+    return f"{n / GIB:.1f}G"
+
+
+@contextlib.contextmanager
+def no_sigterm():
+    """Defer SIGTERM across short critical sections (unlinking a batch's
+    names, rolling one back) so systemd cannot stop us halfway through.
+    A pending SIGTERM is delivered when the block exits."""
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
+
+
+def notify(to, subject, body):
+    """Email `to`. Never raises: a mail failure must not abort a move."""
+    if not to:
+        return
+    try:
+        with open(SMTP_PASSWORD_FILE) as f:
+            password = f.read().strip()
+        msg = email.message.EmailMessage()
+        msg["From"], msg["To"], msg["Subject"] = SENDER, to, subject
+        msg.set_content(body)
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=60, context=context) as smtp:
+            smtp.login(SMTP_USER, password)
+            smtp.send_message(msg)
+        log(f"notified {to}: {subject}")
+    except Exception as error:  # noqa: BLE001 - deliberately best-effort
+        log(f"WARNING: could not send notification: {error}")
+
+
+def mail_failure(to):
+    journal = subprocess.run(
+        ["journalctl", "-u", UNIT, "-n", "40", "--no-pager", "-o", "short-iso"],
+        capture_output=True, text=True).stdout
+    notify(to, "drain-branch run failed",
+           f"{UNIT} failed. Nothing is deleted from a source branch unless its "
+           f"copy verified, and the media containers are restarted by "
+           f"ExecStopPost.\n\nLast journal lines:\n\n{journal}")
+
+
+# ---------------------------------------------------------------- mergerfs
+
+def control_xattr(name):
+    try:
+        return os.getxattr(CONTROL, f"user.mergerfs.{name}".encode()).decode()
+    except OSError as error:
+        fail(f"cannot read {name} from {CONTROL}: {error} (is mergerfs up?)")
+
+
+def read_branches():
+    """Return [(path, mode)] from mergerfs' runtime branch list."""
+    result = []
+    for part in control_xattr("branches").split(":"):
+        if part:
+            path, _, mode = part.partition("=")
+            result.append((path, mode or "RW"))
+    return result
+
+
+# ------------------------------------------------------------- containers
+
+def containers_using_mnt():
+    """Names of running containers with any bind mount under /mnt."""
+    ids = subprocess.run(["docker", "ps", "-q"], capture_output=True, text=True,
+                         check=True).stdout.split()
+    if not ids:
+        return []
+    out = subprocess.run(
+        ["docker", "inspect", "--format",
+         "{{.Name}}{{range .Mounts}} {{.Source}}{{end}}", *ids],
+        capture_output=True, text=True, check=True).stdout
+    busy = []
+    for line in out.splitlines():
+        name, *sources = line.split()
+        if any(s == "/mnt" or s.startswith("/mnt/") for s in sources):
+            busy.append(name.lstrip("/"))
+    return busy
+
+
+# ------------------------------------------------------------- temperature
+
+def disk_for(path):
+    """Whole-disk device node backing the filesystem at path."""
+    st = os.stat(path)
+    sys_path = os.path.realpath(f"/sys/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}")
+    if os.path.exists(os.path.join(sys_path, "partition")):
+        sys_path = os.path.dirname(sys_path)
+    return "/dev/" + os.path.basename(sys_path)
+
+
+def temperature(dev):
+    """Return (celsius, note). celsius is None when the disk is asleep (not
+    woken to ask: it is cool by definition) or unreadable; note says which."""
+    try:
+        r = subprocess.run(["smartctl", "-j", "-n", "standby", "-d", "sat", "-A", dev],
+                           capture_output=True, text=True, timeout=SMARTCTL_TIMEOUT)
+        data = json.loads(r.stdout)
+    except (subprocess.TimeoutExpired, ValueError):
+        return None, "unreadable"
+    current = data.get("temperature", {}).get("current")
+    if isinstance(current, int):
+        return current, ""
+    messages = " ".join(m.get("string", "") for m in
+                        data.get("smartctl", {}).get("messages", []))
+    if "STANDBY" in messages.upper() or "SLEEP" in messages.upper():
+        return None, "standby"
+    return None, "unreadable"
+
+
+def hottest(devices):
+    """Return (max celsius or None, description). An unreadable disk counts
+    as infinitely hot: the guard fails closed."""
+    worst, parts, unreadable = None, [], False
+    for dev in devices:
+        t, note = temperature(dev)
+        parts.append(f"{dev}={t if t is not None else note}")
+        if note == "unreadable":
+            unreadable = True
+        elif t is not None and (worst is None or t > worst):
+            worst = t
+    return (float("inf") if unreadable else worst), " ".join(parts)
+
+
+# -------------------------------------------------------------------- scan
+
+class Component:
+    """Items joined by hardlinks; moves as a unit to one destination."""
+
+    def __init__(self, items):
+        self.items = sorted(items)
+        self.units = []       # [[rel, ...]] one per inode (all its names)
+        self.dirs = []        # dir rels inside the items, shallowest first
+        self.stats = {}       # rel -> (ino, size, mtime_ns, nlink) at scan
+        self.bytes = 0
+        self.newest = 0.0     # max(mtime, ctime) over every entry
+        self.pinned = False   # an inode has links outside the scanned tree
+        self.source = None
+
+
+def item_of(rel):
+    return "/".join(rel.split("/")[:2])
+
+
+def scan(branch):
+    """Walk branch; return list of Components."""
+    files = {}    # key -> {"size", "nlink", "rels", "newest", "stats"}
+    item_dirs = {}
+    for top in sorted(os.listdir(branch)):
+        if top in SKIP_ROOT:
+            continue
+        top_path = os.path.join(branch, top)
+        st = os.lstat(top_path)
+        if not stat.S_ISDIR(st.st_mode):
+            add_file(files, top, st)
+            continue
+        for root, dirs, names in os.walk(top_path, onerror=walk_error):
+            dirs.sort()
+            rel_root = os.path.relpath(root, branch)
+            if rel_root != top:
+                item_dirs.setdefault(item_of(rel_root), []).append(rel_root)
+            # os.walk lists symlinks to directories under dirs; they are files
+            # for our purposes (rsync copies the link, never its target).
+            for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+                rel = os.path.join(rel_root, name)
+                add_file(files, rel, os.lstat(os.path.join(branch, rel)))
+
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for item in item_dirs:
+        find(item)
+    for info in files.values():
+        first = find(item_of(info["rels"][0]))
+        for rel in info["rels"][1:]:
+            other = find(item_of(rel))
+            if other != first:
+                parent[other] = first
+
+    members = {}
+    for item in list(parent):
+        members.setdefault(find(item), []).append(item)
+    components = {root: Component(items) for root, items in members.items()}
+    for info in files.values():
+        comp = components[find(item_of(info["rels"][0]))]
+        comp.units.append(sorted(info["rels"]))
+        comp.stats.update(info["stats"])
+        comp.bytes += info["size"]
+        comp.newest = max(comp.newest, info["newest"])
+        if len(info["rels"]) != info["nlink"]:
+            comp.pinned = True
+    for item, dirs in item_dirs.items():
+        comp = components[find(item)]
+        comp.dirs.extend(dirs)
+        for d in dirs:
+            st = os.lstat(os.path.join(branch, d))
+            comp.newest = max(comp.newest, st.st_mtime, st.st_ctime)
+    for comp in components.values():
+        comp.source = branch
+        comp.units.sort()
+        comp.dirs.sort(key=lambda d: (d.count("/"), d))
+    return sorted(components.values(), key=lambda c: c.items)
+
+
+def add_file(files, rel, st):
+    # Names with a single link get a key of their own so they never merge.
+    key = st.st_ino if st.st_nlink > 1 else ("single", rel)
+    info = files.setdefault(key, {"size": st.st_size, "nlink": st.st_nlink,
+                                  "rels": [], "newest": 0.0, "stats": {}})
+    info["rels"].append(rel)
+    info["stats"][rel] = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
+    info["newest"] = max(info["newest"], st.st_mtime, st.st_ctime)
+
+
+def lost_and_found(branch):
+    """Entries in branch/lost+found; None if it cannot be read (not root)."""
+    path = os.path.join(branch, "lost+found")
+    try:
+        return os.listdir(path)
+    except FileNotFoundError:
+        return []
+    except PermissionError:
+        return None
+
+
+def source_empty(source):
+    """True when nothing but (possibly empty) directories is left - and
+    lost+found counts: recovered files there are data too."""
+    if lost_and_found(source) != []:  # unreadable counts as not empty
+        return False
+    for top in os.listdir(source):
+        if top in SKIP_ROOT:
+            continue
+        path = os.path.join(source, top)
+        if not os.path.isdir(path) or os.path.islink(path):
+            return False
+        for root, dirs, files in os.walk(path, onerror=walk_error):
+            if files or any(os.path.islink(os.path.join(root, d)) for d in dirs):
+                return False
+    return True
+
+
+# ---------------------------------------------------------------- checks
+
+class WindowClosed(Exception):
+    """The run window ended; stop cleanly."""
+
+
+def ancestors(rel):
+    parts = rel.split("/")
+    return ["/".join(parts[:i]) for i in range(1, len(parts))]
+
+
+def identical(src, dst, compare):
+    """Same type and same content (full compare for regular files)."""
+    s_st, d_st = os.lstat(src), os.lstat(dst)
+    if stat.S_IFMT(s_st.st_mode) != stat.S_IFMT(d_st.st_mode):
+        return False
+    if stat.S_ISLNK(s_st.st_mode):
+        return os.readlink(src) == os.readlink(dst)
+    if stat.S_ISREG(s_st.st_mode):
+        return s_st.st_size == d_st.st_size and compare(src, dst)
+    return False  # fifo/device/socket: never expected in a media tree
+
+
+def plain_compare(src, dst):
+    return filecmp.cmp(src, dst, shallow=False)
+
+
+def blocker(comp, dest, branches, compare):
+    """Return (reason, reused_bytes). reason is None when comp can move to
+    dest. reused_bytes counts inodes already on dest and identical (left by
+    an interrupted run): they need no new space."""
+    others = [b for b in branches if b not in (comp.source, dest)]
+    file_rels = [r for unit in comp.units for r in unit]
+    # Every directory the move creates or relies on must be a real directory
+    # (or absent) on every branch, or the merged view's type for that path
+    # could flip and hide whatever another branch has there.
+    dir_rels = set(comp.dirs)
+    for rel in comp.dirs + file_rels:
+        dir_rels.update(ancestors(rel))
+    for rel in sorted(dir_rels):
+        for b in [dest] + others:
+            p = os.path.join(b, rel)
+            if os.path.lexists(p) and not (os.path.isdir(p) and not os.path.islink(p)):
+                return f"{p} exists and is not a directory", 0
+    reused = 0
+    for unit in comp.units:
+        unit_reused = False
+        for rel in unit:
+            for other in others:
+                if os.path.lexists(os.path.join(other, rel)):
+                    return f"{other}/{rel} also exists (would change which copy is visible)", 0
+            d = os.path.join(dest, rel)
+            if os.path.lexists(d):
+                try:
+                    same = identical(os.path.join(comp.source, rel), d, compare)
+                except FileNotFoundError:
+                    return f"{rel} vanished during the check", 0
+                if not same:
+                    return f"{d} exists and differs", 0
+                # Credit space only if rsync's quick check will skip it;
+                # equal bytes with a different mtime still get re-sent.
+                s_st, d_st = os.lstat(os.path.join(comp.source, rel)), os.lstat(d)
+                if (s_st.st_size, s_st.st_mtime_ns) == (d_st.st_size, d_st.st_mtime_ns):
+                    unit_reused = True
+        if unit_reused:
+            reused += comp.stats[unit[0]][1]
+    return None, reused
+
+
+def free_bytes(path):
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
+
+
+def choose_dest(comp, dests, branches, planned, reserve, compare):
+    """Try branches already holding part of the component first (keeps items
+    whole, and is where an interrupted run left copies), then the rest by
+    projected free space. Returns (dest, None) or (None, reasons)."""
+    def free(d):
+        return free_bytes(d) - planned.get(d, 0)
+
+    holders = [d for d in dests if any(os.path.lexists(os.path.join(d, i)) for i in comp.items)]
+    order = sorted(holders, key=free, reverse=True) + \
+        sorted((d for d in dests if d not in holders), key=free, reverse=True)
+    reasons = []
+    for dest in order:
+        if free(dest) < reserve:
+            reasons.append(f"{dest}: below reserve")
+            continue
+        why, reused = blocker(comp, dest, branches, compare)
+        if why:
+            reasons.append(why)
+            continue
+        if free(dest) - (comp.bytes - reused) < reserve:
+            reasons.append(f"{dest}: no space for {gib(comp.bytes - reused)}")
+            continue
+        return dest, None
+    return None, reasons
+
+
+# -------------------------------------------------------------------- move
+
+def batches(comp, limit):
+    """Split units into batches of at most limit bytes (a bigger unit goes
+    alone). Directories ride with the first batch."""
+    out, current, size = [], [], 0
+    for unit in comp.units:
+        unit_size = comp.stats[unit[0]][1]
+        if current and size + unit_size > limit:
+            out.append(current)
+            current, size = [], 0
+        current.append(unit)
+        size += unit_size
+    if current or not out:
+        out.append(current)
+    return out
+
+
+def rsync_cmd(source, dest, list_path, bwlimit_kib=None, verify=False):
+    cmd = ["rsync", "-aHAX", "--from0", f"--files-from={list_path}"]
+    if verify:
+        cmd += ["-n", "--itemize-changes"]
+    else:
+        cmd += ["--fsync", f"--bwlimit={bwlimit_kib}",
+                f"--temp-dir={os.path.join(dest, TMP_DIR_NAME)}"]
+    return cmd + [source + "/", dest + "/"]
+
+
+def check_quiet():
+    busy = containers_using_mnt()
+    if busy:
+        fail(f"containers using /mnt started mid-run: {' '.join(busy)} "
+             f"(was mediaserver.service started or reloaded?)")
+
+
+class Run:
+    def __init__(self, args):
+        self.args = args
+        self.moved = 0
+        self.moved_from = {}
+        self.devices = []  # disks the current component touches
+
+    def time_left(self):
+        return (self.args.deadline - datetime.datetime.now()).total_seconds()
+
+    def check_deadline(self):
+        if self.time_left() <= 0:
+            raise WindowClosed
+
+    def wait_cool(self):
+        """Block until every current device is under --max-temp. Returns
+        True if it had to wait."""
+        waited = False
+        while True:
+            self.check_deadline()
+            worst, desc = hottest(self.devices)
+            if worst is None or worst < self.args.max_temp:
+                return waited
+            waited = True
+            wait = self.args.cool_wait * 60
+            if self.time_left() < wait:
+                log(f"too hot ({desc}) and the window is closing")
+                raise WindowClosed
+            log(f"too hot ({desc}); pausing {self.args.cool_wait} min")
+            time.sleep(wait)
+
+    def compare(self, src, dst):
+        """Full compare, throttled to --bwlimit and paused while hot: an
+        interrupted run can leave many GiB of copies to re-check."""
+        self.devices = sorted({disk_for(src), disk_for(dst)})
+        self.wait_cool()
+        rate = self.args.bwlimit * 2**20
+        chunk = 8 * 2**20
+        t0 = next_check = time.monotonic()
+        done = 0
+        with open(src, "rb") as f1, open(dst, "rb") as f2:
+            while True:
+                a, b = f1.read(chunk), f2.read(chunk)
+                if a != b:
+                    return False
+                if not a:
+                    return True
+                done += len(a)
+                ahead = done / rate - (time.monotonic() - t0)
+                if ahead > 0:
+                    time.sleep(ahead)
+                if time.monotonic() >= next_check:
+                    if self.wait_cool():
+                        # Restart the throttle clock: a cooling pause must not
+                        # bank credit for a full-speed burst afterwards.
+                        t0, done = time.monotonic(), 0
+                    next_check = time.monotonic() + TEMP_POLL
+
+    def supervised(self, cmd):
+        """Run a copy. A hot disk pauses rsync in place (SIGSTOP) until it
+        cools, so a large file is never restarted from zero. The window
+        closing stops it (WindowClosed)."""
+        proc = subprocess.Popen(cmd, start_new_session=True)
+        paused = False
+        next_check = time.monotonic() + TEMP_POLL
+        try:
+            while True:
+                try:
+                    rc = proc.wait(timeout=5)
+                    if rc != 0:
+                        fail(f"rsync exited {rc}: {' '.join(cmd)}")
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+                self.check_deadline()
+                if time.monotonic() < next_check:
+                    continue
+                worst, desc = hottest(self.devices)
+                hot = worst is not None and worst >= self.args.max_temp
+                if hot and not paused:
+                    log(f"too hot mid-copy ({desc}); pausing rsync")
+                    os.killpg(proc.pid, signal.SIGSTOP)
+                    paused = True
+                elif not hot and paused:
+                    log(f"cooled ({desc}); resuming rsync")
+                    os.killpg(proc.pid, signal.SIGCONT)
+                    paused = False
+                next_check = time.monotonic() + (self.args.cool_wait * 60 if paused else TEMP_POLL)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGTERM)  # rsync removes its temp file
+                os.killpg(proc.pid, signal.SIGCONT)  # a stopped rsync must wake to see it
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+
+    def move(self, comp, dest):
+        """Move one component in batches. Raises WindowClosed to stop."""
+        source = comp.source
+        os.makedirs(os.path.join(dest, TMP_DIR_NAME), exist_ok=True)
+        rate = self.args.bwlimit * 2**20
+        self.devices = sorted({disk_for(source), disk_for(dest)})
+        for i, batch in enumerate(batches(comp, self.args.batch_gb * GIB)):
+            rels = [r for unit in batch for r in unit]
+            if i == 0:
+                rels = comp.dirs + rels
+            if not rels:
+                continue
+            size = sum(comp.stats[u[0]][1] for u in batch)
+            need = sum(comp.stats[u[0]][1] for u in batch
+                       if not any(os.path.lexists(os.path.join(dest, r)) for r in u))
+            if free_bytes(dest) - need < self.args.reserve_gb * GIB:
+                fail(f"{dest} would drop below {self.args.reserve_gb}G free")
+            if need / rate > self.time_left():
+                log(f"window closes before a {gib(need)} batch would finish")
+                raise WindowClosed
+            self.wait_cool()
+            for path in (source, dest):
+                if not os.path.ismount(path):
+                    fail(f"{path} is no longer mounted")
+            check_quiet()
+
+            # Everything this batch creates on dest; removed again unless the
+            # batch commits, so the apps never restart onto a half-published
+            # move (some names of a hardlink on dest, others not).
+            created = [r for r in rels if not os.path.lexists(os.path.join(dest, r))]
+            committed = False
+            t0 = time.monotonic()
+            try:
+                with tempfile.NamedTemporaryFile("wb", prefix="drain-branch-") as lst:
+                    lst.write(b"".join(os.fsencode(r) + b"\0" for r in rels))
+                    lst.flush()
+                    self.supervised(rsync_cmd(source, dest, lst.name, self.args.bwlimit * 1024))
+                    verify = subprocess.run(rsync_cmd(source, dest, lst.name, verify=True),
+                                            capture_output=True, text=True)
+                if verify.returncode != 0:
+                    fail(f"verify rsync exited {verify.returncode}: {verify.stderr.strip()}")
+                diffs = [line for line in verify.stdout.splitlines()
+                         if line and not line.startswith(("cd", ".d"))]
+                if diffs:
+                    fail(f"verify pass shows differences for {comp.items}: {diffs[:5]}")
+                # Destination data and directory entries must be durable
+                # before the source names go: the filesystems share no ordering.
+                subprocess.run(["sync", "-f", dest], check=True)
+                check_quiet()
+                for unit in batch:
+                    self.check_unit(comp, dest, unit)
+                committed = True
+            finally:
+                if not committed:
+                    self.roll_back(dest, created)
+            with no_sigterm():
+                for unit in batch:
+                    for rel in unit:
+                        try:
+                            os.unlink(os.path.join(source, rel))
+                        except OSError as error:
+                            # Copies are verified and durable, so nothing is
+                            # lost - but this inode's names are now split.
+                            fail(f"unlink {source}/{rel} failed after commit: {error}; "
+                                 f"destination copies are complete, remove the "
+                                 f"remaining source names of {unit} by hand")
+            self.moved += size
+            self.moved_from[source] = self.moved_from.get(source, 0) + size
+            log(f"  batch {i + 1}: {gib(size)} in {(time.monotonic() - t0) / 60:.1f} min")
+
+        for rel in reversed(comp.dirs):
+            if os.path.isdir(os.path.join(dest, rel)):
+                try:
+                    os.rmdir(os.path.join(source, rel))
+                except OSError:
+                    pass  # not empty: something new appeared; a later run gets it
+
+    @staticmethod
+    def check_unit(comp, dest, unit):
+        """Before deleting any name of an inode, check every name: source
+        unchanged since the scan, destination names one inode with matching
+        size and mtime. Validating the whole unit up front matters because
+        each unlink lowers the link count the next name would be checked
+        against."""
+        dest_inodes = set()
+        for rel in unit:
+            s, d = os.path.join(comp.source, rel), os.path.join(dest, rel)
+            ino, size, mtime_ns, nlink = comp.stats[rel]
+            s_st, d_st = os.lstat(s), os.lstat(d)
+            if (s_st.st_ino, s_st.st_size, s_st.st_mtime_ns, s_st.st_nlink) != (ino, size, mtime_ns, nlink):
+                fail(f"{s} changed during the move; nothing deleted for it - resolve by hand")
+            if (d_st.st_size, d_st.st_mtime_ns) != (size, mtime_ns) \
+                    or stat.S_IFMT(s_st.st_mode) != stat.S_IFMT(d_st.st_mode):
+                fail(f"{d} does not match {s} after copy; nothing deleted for it")
+            dest_inodes.add(d_st.st_ino)
+        if len(dest_inodes) != 1:
+            fail(f"hardlinks of {unit[0]} were not preserved on {dest}; nothing deleted for it")
+
+    @staticmethod
+    def roll_back(dest, created):
+        problems = []
+        with no_sigterm():
+            for rel in reversed(created):
+                path = os.path.join(dest, rel)
+                try:
+                    if os.path.isdir(path) and not os.path.islink(path):
+                        os.rmdir(path)
+                    else:
+                        os.unlink(path)
+                except FileNotFoundError:
+                    pass  # rsync never got to it
+                except OSError as error:
+                    if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                        problems.append(f"{path}: {error}")
+        if problems:
+            os.makedirs(os.path.dirname(NEEDS_RECOVERY), exist_ok=True)
+            with open(NEEDS_RECOVERY, "w") as f:
+                f.write("rollback incomplete:\n" + "\n".join(problems) + "\n")
+            fail(f"rollback on {dest} incomplete ({len(problems)} entries); media "
+                 f"containers stay down until {NEEDS_RECOVERY} is resolved and removed")
+        log(f"  rolled back {len(created)} new entries on {dest}")
+
+
+# -------------------------------------------------------------------- restore
+
+def restore(args):
+    """ExecStopPost: restart the containers this run stopped, if the stack is
+    still meant to be up. Exits non-zero (failing the unit, so OnFailure
+    mails) and keeps the record if a container does not come back."""
+    try:
+        with open(STOPPED_STATE) as f:
+            names = f.read().split()
+    except FileNotFoundError:
+        return
+    if os.path.exists(NEEDS_RECOVERY):
+        fail(f"{NEEDS_RECOVERY} exists; leaving {' '.join(names)} stopped")
+    state = subprocess.run(["systemctl", "is-active", "mediaserver.service"],
+                           capture_output=True, text=True).stdout.strip()
+    if state in ("inactive", "failed", "deactivating"):
+        # Stopping or stopped (e.g. thermal shutdown): its next start brings
+        # everything up via compose, so there is nothing to restore.
+        log(f"mediaserver.service is {state}; not restarting {' '.join(names)}")
+        os.unlink(STOPPED_STATE)
+        return
+    if state != "active":
+        fail(f"cannot tell whether mediaserver.service is up ({state or 'query failed'}); "
+             f"leaving {' '.join(names)} stopped, record kept in {STOPPED_STATE}")
+    if names:
+        # A drain cancelled mid `docker stop` leaves the daemon-side stop
+        # running; stopping again waits for it, so start cannot race it.
+        subprocess.run(["docker", "stop", "-t", "120", *names], stdout=subprocess.DEVNULL)
+        log(f"restarting {' '.join(names)}")
+        subprocess.run(["docker", "start", *names], stdout=subprocess.DEVNULL)
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Name}} {{.State.Running}}", *names],
+            capture_output=True, text=True).stdout
+        up = {line.split()[0].lstrip("/") for line in out.splitlines() if line.endswith(" true")}
+        down = [n for n in names if n not in up]
+        if down:
+            fail(f"containers did not restart: {' '.join(down)} (record kept in {STOPPED_STATE})")
+    os.unlink(STOPPED_STATE)
+
+
+# -------------------------------------------------------------------- main
+
+def parse_window(value):
+    """'HH:MM-HH:MM' -> (deadline datetime, inside-window bool). The window
+    may cross midnight."""
+    start_s, end_s = value.split("-")
+    start = datetime.time(*(int(x) for x in start_s.split(":")))
+    end = datetime.time(*(int(x) for x in end_s.split(":")))
+    now = datetime.datetime.now()
+    t = now.time()
+    inside = (start <= t < end) if start < end else (t >= start or t < end)
+    deadline = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+    if deadline <= now:
+        deadline += datetime.timedelta(days=1)
+    return deadline, inside
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("sources", nargs="*", help="branches to drain, in order")
+    ap.add_argument("--execute", action="store_true", help="actually move (default: dry-run)")
+    ap.add_argument("--window", metavar="HH:MM-HH:MM",
+                    help="only run inside this window (required with --execute)")
+    ap.add_argument("--stop", nargs="+", default=[], metavar="CONTAINER",
+                    help="containers to stop before moving (restarted by the unit)")
+    ap.add_argument("--exclude", nargs="+", default=[], metavar="BRANCH",
+                    help="never use these as destinations (dry-runs before every "
+                    "retiring branch is NC)")
+    ap.add_argument("--bwlimit", type=int, default=20, help="MiB/s per rsync (default 20)")
+    ap.add_argument("--max-temp", type=int, default=53, help="pause at this disk temp, C (default 53)")
+    ap.add_argument("--cool-wait", type=int, default=15, help="minutes between temp checks while hot")
+    ap.add_argument("--min-age-hours", type=float, default=24, help="defer components newer than this")
+    ap.add_argument("--batch-gb", type=int, default=20, help="max GiB per rsync batch (default 20)")
+    ap.add_argument("--reserve-gb", type=int, default=100, help="keep this much free on destinations")
+    ap.add_argument("--notify", metavar="EMAIL",
+                    help="email when a branch empties, everything is drained, or only "
+                    "skipped items remain (--execute only)")
+    ap.add_argument("--mail-failure", metavar="EMAIL",
+                    help="email the unit's recent journal and exit (OnFailure hook)")
+    ap.add_argument("--restore", action="store_true",
+                    help="restart the containers a run stopped and exit (ExecStopPost)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="list every component")
+    args = ap.parse_args()
+
+    if args.mail_failure:
+        mail_failure(args.mail_failure)
+        return
+    if args.restore:
+        restore(args)
+        return
+    if not args.sources:
+        ap.error("at least one source branch is required")
+    args.sources = [s.rstrip("/") for s in args.sources]
+    notify_to = args.notify if args.execute else None
+
+    branches = read_branches()
+    modes = dict(branches)
+    for s in args.sources:
+        if s not in modes:
+            fail(f"{s} is not a mergerfs branch ({':'.join(modes)})")
+        if not os.path.ismount(s):
+            fail(f"{s} is not a mountpoint")
+    # NC branches are retiring too, even when not named in this run: never
+    # move one retiring disk's data onto another.
+    dests = [b for b, m in branches
+             if m == "RW" and b not in args.sources and b not in args.exclude]
+    if not dests:
+        fail("no RW destination branches")
+    for d in dests:
+        if not os.path.ismount(d):
+            fail(f"{d} is not a mountpoint")
+    policy = control_xattr("category.create")
+    not_nc = [s for s in args.sources if modes[s] != "NC"]
+
+    if args.execute:
+        if os.geteuid() != 0:
+            fail("--execute requires root")
+        if not args.window:
+            fail("--execute requires --window")
+        args.deadline, inside = parse_window(args.window)
+        if not inside:
+            fail(f"outside the {args.window} window; refusing to start")
+        if not_nc:
+            fail(f"not NC in mergerfs yet: {' '.join(not_nc)}")
+        if policy != "mspmfs":
+            fail(f"category.create is {policy}; set it to mspmfs first")
+        for path in (NEEDS_RECOVERY, STOPPED_STATE):
+            if os.path.exists(path):
+                fail(f"{path} exists from an earlier run; resolve it first")
+        lock = open(LOCK, "w")  # noqa: SIM115 - held for the process lifetime
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail("another drain-branch is running")
+        # systemd stops (timeout, PartOf on a DAS shutdown) arrive as SIGTERM:
+        # turn it into an exception so in-flight batches roll back.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+        if args.stop:
+            running = subprocess.run(
+                ["docker", "inspect", "--format", "{{.Name}} {{.State.Running}}", *args.stop],
+                capture_output=True, text=True, check=True).stdout.splitlines()
+            to_stop = [line.split()[0].lstrip("/") for line in running if line.endswith(" true")]
+            # Record before stopping, so a crash mid-stop still restores them.
+            with open(STOPPED_STATE, "w") as f:
+                f.write("\n".join(to_stop) + "\n")
+            if to_stop:
+                log(f"stopping {' '.join(to_stop)}")
+                subprocess.run(["docker", "stop", "-t", "120", *to_stop], check=True,
+                               stdout=subprocess.DEVNULL)
+        busy = containers_using_mnt()
+        if busy:
+            fail(f"running containers still mount /mnt: {' '.join(busy)}")
+    else:
+        log("DRY RUN - nothing will be moved")
+        if not_nc:
+            log(f"precondition not met yet: {' '.join(not_nc)} must be NC before --execute")
+        if policy != "mspmfs":
+            log(f"precondition not met yet: category.create is {policy}, should be mspmfs")
+        busy = [c for c in containers_using_mnt() if c not in args.stop]
+        if busy:
+            log(f"note: --execute would refuse while these run unstopped: {' '.join(busy)}")
+
+    log(f"destinations: {' '.join(dests)}")
+    run = Run(args)
+    cutoff = time.time() - args.min_age_hours * 3600
+    planned = {}
+    deferred, skipped = 0, []
+    remaining = 0
+
+    for source in args.sources:
+        log(f"scanning {source} ...")
+        leftovers = lost_and_found(source)
+        if leftovers is None:
+            log(f"NOTE: cannot read {source}/lost+found (needs root)")
+        elif leftovers:
+            log(f"NOTE: {source}/lost+found holds {len(leftovers)} entries; "
+                f"not migrated - review them by hand before retiring the disk")
+        components = scan(source)
+        src_bytes = sum(c.bytes for c in components)
+        remaining += src_bytes
+        log(f"{source}: {len(components)} components, {gib(src_bytes)}")
+        for comp in components:
+            label = ", ".join(comp.items)
+            if comp.pinned:
+                skipped.append(f"{source} {label}: hardlinked outside the scanned tree")
+                log(f"SKIP {skipped[-1]}")
+                continue
+            if comp.newest > cutoff:
+                deferred += 1
+                if args.verbose:
+                    log(f"defer {label}: changed within {args.min_age_hours:g}h")
+                continue
+            try:
+                dest, reasons = choose_dest(comp, dests, [b for b, _ in branches], planned,
+                                            args.reserve_gb * GIB,
+                                            run.compare if args.execute else plain_compare)
+            except WindowClosed:
+                log(f"window closed; moved {gib(run.moved)} this run")
+                return
+            if not dest:
+                skipped.append(f"{source} {label}: {'; '.join(reasons)}")
+                log(f"SKIP {skipped[-1]}")
+                continue
+            if not args.execute:
+                planned[dest] = planned.get(dest, 0) + comp.bytes
+                if args.verbose:
+                    log(f"{gib(comp.bytes):>8} {source} -> {dest}: {label}")
+                continue
+            log(f"moving {gib(comp.bytes)} {source} -> {dest}: {label}")
+            try:
+                run.move(comp, dest)
+            except WindowClosed:
+                log(f"window closed; moved {gib(run.moved)} this run")
+                return
+        if args.execute and run.moved_from.get(source) and source_empty(source):
+            log(f"{source} is empty")
+            notify(notify_to, f"drain-branch: {source} is empty",
+                   f"Every file has been moved off {source} "
+                   f"({gib(run.moved_from[source])} in the last run).\n\n"
+                   f"Before pulling the disk, remove {source} from mergerfs.service, "
+                   f"mount-das.service, etc/smartd.conf and the scrutiny devices list.")
+
+    if args.execute:
+        log(f"done: moved {gib(run.moved)} this run")
+        if run.moved and all(source_empty(s) for s in args.sources):
+            notify(notify_to, "drain-branch: all done",
+                   f"{' '.join(args.sources)} are empty. Disable drain-branch.timer, "
+                   f"restore category.create, and retire the disks.")
+        elif skipped and not run.moved and not deferred:
+            notify(notify_to, "drain-branch: stuck on skipped items",
+                   "Nothing else is left to move; these need a manual decision:\n\n"
+                   + "\n".join(skipped))
+    else:
+        total = sum(planned.values())
+        for d in dests:
+            if planned.get(d):
+                log(f"plan: {gib(planned[d]):>8} -> {d} (now {gib(free_bytes(d))} free)")
+        hours = total / (args.bwlimit * 2**20) / 3600
+        log(f"plan: {gib(total)} of {gib(remaining)} movable now, "
+            f"~{hours:.0f}h of copying at {args.bwlimit} MiB/s")
+    log(f"deferred (recent changes): {deferred}, skipped: {len(skipped)}")
+    if skipped:
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
