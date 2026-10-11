@@ -171,7 +171,8 @@ files of identical size will silently overwrite each other.
 - `drain-branch` - Empties retiring branches onto the rest of the pool, slowly,
   so disks can be pulled (currently `/mnt/07`, `/mnt/04`, `/mnt/03`: the three
   hot 7200 rpm drives). Run by `drain-branch.timer` (00:30 Mon-Fri) through
-  `drain-branch.service`: 20 MiB/s, window 00:30-06:30, pauses rsync at 53°C.
+  `drain-branch.service`: 20 MiB/s, window 00:30-06:30, pauses rsync at 55°C (smartd warns at 55, cuts
+  DAS power at 60; the drives idle at 47-52°C).
   Each run stops the five containers that mount `/mnt/merged` (deluge radarr
   sonarr bazarr jellyfin) and `--restore` (ExecStopPost) restarts them -
   moving files under live apps can lose data. Hardlink groups move together;

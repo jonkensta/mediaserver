@@ -22,7 +22,7 @@ Type=oneshot
 # Do not start or reload mediaserver.service during the window: the script
 # detects containers coming back and aborts (rolling back the batch).
 ExecStart=/usr/local/bin/drain-branch /mnt/07 /mnt/04 /mnt/03 \
-  --execute --window 00:30-06:30 \
+  --execute --window 00:30-06:30 --max-temp 55 \
   --stop deluge radarr sonarr bazarr jellyfin \
   --notify jstarr@jstarr.me
 # Runs after success, failure and timeout alike; restarts only what the run
