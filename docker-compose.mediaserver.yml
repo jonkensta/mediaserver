@@ -34,8 +34,16 @@ services:
       - TZ=America/Chicago
     volumes:
       - ./radarr:/config
-      - /mnt/merged/Movies:/movies
-      - /mnt/merged/Downloads:/downloads
+      - type: bind
+        source: /mnt/merged/Movies
+        target: /movies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/merged/Downloads
+        target: /downloads
+        bind:
+          create_host_path: false
     restart: on-failure
     networks:
       - mediaserver
@@ -49,8 +57,16 @@ services:
       - TZ=America/Chicago
     volumes:
       - ./sonarr:/config
-      - /mnt/merged/TV:/tv
-      - /mnt/merged/Downloads:/downloads
+      - type: bind
+        source: /mnt/merged/TV
+        target: /tv
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/merged/Downloads
+        target: /downloads
+        bind:
+          create_host_path: false
     restart: on-failure
     networks:
       - mediaserver
@@ -64,8 +80,16 @@ services:
       - TZ=America/Chicago
     volumes:
       - ./bazarr:/config
-      - /mnt/merged/Movies:/movies
-      - /mnt/merged/TV:/tv
+      - type: bind
+        source: /mnt/merged/Movies
+        target: /movies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/merged/TV
+        target: /tv
+        bind:
+          create_host_path: false
     restart: on-failure
     networks:
       - mediaserver
@@ -118,7 +142,11 @@ services:
       - DELUGE_LOGLEVEL=error
     volumes:
       - ./deluge:/config
-      - /mnt/merged/Downloads:/downloads
+      - type: bind
+        source: /mnt/merged/Downloads
+        target: /downloads
+        bind:
+          create_host_path: false
     restart: on-failure
     depends_on:
       - gluetun
@@ -133,8 +161,16 @@ services:
       - JELLYFIN_PublishedServerUrl=
     volumes:
       - ./jellyfin:/config
-      - /mnt/merged/TV:/data/tvshows
-      - /mnt/merged/Movies:/data/movies
+      - type: bind
+        source: /mnt/merged/TV
+        target: /data/tvshows
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/merged/Movies
+        target: /data/movies
+        bind:
+          create_host_path: false
     devices:
       - /dev/dri:/dev/dri
     restart: on-failure

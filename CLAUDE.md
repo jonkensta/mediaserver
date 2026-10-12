@@ -39,7 +39,18 @@ This repository contains configuration files and utilities for managing a Docker
      restores those at daemon start regardless of whether mergerfs is up,
      which is how a failed DAS mount ends with Deluge writing into the root
      filesystem. `on-failure` still restarts a crashed container while dockerd
-     runs, but does not resurrect it at boot.
+     runs, but does not resurrect it at boot — **after a clean shutdown
+     only**. After a hard power loss dockerd still has them recorded as
+     running, treats them as failed, and `on-failure` restarts them at boot
+     (seen 2026-10-11: Jellyfin came up on the empty mountpoint 12 minutes
+     before the DAS mounted, and kept serving it).
+   - The real guard: the five containers that mount the pool (deluge
+     radarr sonarr bazarr jellyfin) use long-form binds with
+     `create_host_path: false`, and the root filesystem has **no**
+     subdirectories under `/mnt/merged`. With the pool absent, `/mnt/merged/TV`
+     etc. do not exist, so dockerd's start fails with "bind source path does
+     not exist" instead of mounting an empty directory. Never `mkdir` under an
+     unmounted `/mnt/merged`, and new pool mounts must use the same syntax.
 
 4. **Thermal protection** (`etc/smartd.conf` + `bin/das-thermal-shutdown`)
    - smartd polls every DAS drive over SMART every 5 minutes (`etc/conf.d/smartd`)
