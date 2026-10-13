@@ -24,7 +24,5 @@ devices:
     type: sat
   - device: /dev/sdf   # Hitachi HUS724040ALE641 PCHJ54EB
     type: sat
-  - device: /dev/sdg   # Hitachi HUS724040ALE641 PBK9K9LS
-    type: sat
   - device: /dev/nvme0n1
     type: nvme

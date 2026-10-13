@@ -16,12 +16,12 @@ OnFailure=drain-branch-failed.service
 
 [Service]
 Type=oneshot
-# Sources drain in order: /mnt/07 (smallest, hottest), then /mnt/04, /mnt/03.
+# Sources drain in order: /mnt/04, then /mnt/03 (/mnt/07 is done and pulled).
 # --stop: every container that mounts /mnt/merged. Moving files under them
 # live can lose data, so the script stops them and refuses if any remain.
 # Do not start or reload mediaserver.service during the window: the script
 # detects containers coming back and aborts (rolling back the batch).
-ExecStart=/usr/local/bin/drain-branch /mnt/07 /mnt/04 /mnt/03 \
+ExecStart=/usr/local/bin/drain-branch /mnt/04 /mnt/03 \
   --execute --window 00:30-06:30 --max-temp 55 \
   --stop deluge radarr sonarr bazarr jellyfin \
   --notify jstarr@jstarr.me

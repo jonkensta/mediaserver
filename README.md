@@ -10,7 +10,7 @@ Create a user and group for each docker container:
 sudo useradd media
 ```
 
-Eight data drives are mounted to `/mnt/00` through `/mnt/07` and combined using mergerfs:
+The data drives (currently six, `/mnt/00` through `/mnt/05`) are mounted by `mount-das.service` and combined using mergerfs:
 
 ```bash
 cd /mnt

@@ -9,15 +9,15 @@ and pauses whenever a disk involved runs hot. A weekday-night timer
 between branches.
 
 Usage:
-  drain-branch /mnt/07 /mnt/04 /mnt/03                      # dry-run plan
-  drain-branch /mnt/07 /mnt/04 /mnt/03 --execute --window 00:30-06:30 \\
+  drain-branch /mnt/04 /mnt/03                      # dry-run plan
+  drain-branch /mnt/04 /mnt/03 --execute --window 00:30-06:30 \\
       --stop deluge radarr sonarr bazarr jellyfin --notify you@example.com
 
 Preconditions for --execute (all checked):
 - root (source trees are owned by media; rsync -a preserves ownership)
 - every source branch is NC (no-create) and category.create is mspmfs, so
   nothing new lands on a retiring branch between runs. At runtime:
-    setfattr -n user.mergerfs.branches -v '/mnt/00=RW:...:/mnt/07=NC' \\
+    setfattr -n user.mergerfs.branches -v '/mnt/00=RW:...:/mnt/04=NC:/mnt/05=RW' \\
       /mnt/merged/.mergerfs
     setfattr -n user.mergerfs.category.create -v mspmfs /mnt/merged/.mergerfs
 - the current time is inside --window

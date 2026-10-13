@@ -303,7 +303,6 @@ services:
       - /dev/disk/by-id/ata-HGST_HUS724040ALE640_PK2338P4GXWMXC:/dev/sdd
       - /dev/disk/by-id/ata-WDC_WD120EMFZ-11A6JA0_9RG714DC:/dev/sde
       - /dev/disk/by-id/ata-Hitachi_HUS724040ALE641_PCHJ54EB:/dev/sdf
-      - /dev/disk/by-id/ata-Hitachi_HUS724040ALE641_PBK9K9LS:/dev/sdg
     restart: on-failure
     # No host port: reached only via SWAG (scrutiny.subdomain.conf, behind
     # Authelia). Observability only - smartd remains the thermal actor.
