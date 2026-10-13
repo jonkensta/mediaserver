@@ -81,7 +81,7 @@ This repository contains configuration files and utilities for managing a Docker
 
 - **VPN Routing**: Deluge traffic routes through Gluetun VPN container using `network_mode: "service:gluetun"`
   - This affects reverse proxy setup: deluge's nginx config must set `upstream_app` to `gluetun` instead of `deluge`
-- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 14 services (bazarr, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
+- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 15 services (austin-calendar, bazarr, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
 - **Forward Auth**: Authelia sits in front of the browser-facing admin UIs via SWAG's `auth_request` snippets (see the Authelia section below). Jellyfin and FoundryVTT keep their native auth only.
 - **Two networks**: `frontend` (compose-managed) holds the internet-facing tier — swag and endlessh. `mediaserver` (external, shared with the pihole compose file) holds everything else. `swag` is the only container on both, bridging TLS termination to the backend. `endlessh` is frontend-only, so a compromise there cannot reach Deluge RPC, the \*arr APIs, or Gluetun's control server. This limits blast radius but is not auth: a proxy-conf without auth still exposes an admin UI.
 - **Service Communication**: Non-host-mode containers communicate via Docker DNS using container names
@@ -353,6 +353,29 @@ workstation, github.com/jonkensta/radioambulante-study); episodes are built ther
   `default.conf` is seen by `nginx -s reload`.
 - Audio files carry a content hash in their name and are cached privately for
   30 days; `index.html` and `data/` are `no-cache`.
+
+### Austin Calendar (events calendar with Claude picks)
+
+Austin events calendar at `calendar.jstarr.me`, behind Authelia. It replaces
+the austin-mailer and movie-mailer Cloudflare Workers. Source lives in a
+separate private repo (`github.com/jonkensta/austin-calendar`). It deploys
+the same way as whisker: `/opt/mediaserver/austin-calendar/app` is a git
+clone, the compose service builds from it, and the repo's `deploy/deploy.sh`
+fast-forwards the clone and rebuilds.
+
+- Scrapes the sources every 6 hours into SQLite at
+  `/opt/mediaserver/austin-calendar/data` (mode 0700), then has Claude
+  score the new events against a taste profile that is tuned by thumbs
+  up/down votes in the UI.
+- Runs as `1000:1000` (jstarr). Secrets are in
+  `/opt/mediaserver/austin-calendar/.env` (mode 0600), passed with
+  `env_file`: the Anthropic, OMDb and Fastmail keys, plus `ICS_TOKEN`.
+  None of them are in this repo.
+- `/cal/<ICS_TOKEN>.ics` (the picks feed) **bypasses Authelia** in
+  `swag/proxy-confs/calendar.subdomain.conf`, because calendar clients can't
+  follow a forward-auth redirect. The token is the credential, as with
+  healthchecks' `/ping/`. The location regex matches only that path.
+- Manual refresh: `docker exec austin-calendar node dist/cli.js`.
 
 ### FoundryVTT
 
