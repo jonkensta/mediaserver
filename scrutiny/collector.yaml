@@ -22,7 +22,5 @@ devices:
     type: sat
   - device: /dev/sde   # WDC WD120EMFZ 9RG714DC
     type: sat
-  - device: /dev/sdf   # Hitachi HUS724040ALE641 PCHJ54EB
-    type: sat
   - device: /dev/nvme0n1
     type: nvme

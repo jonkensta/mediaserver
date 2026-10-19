@@ -13,10 +13,11 @@ This repository contains configuration files and utilities for managing a Docker
 1. **DAS Management** (`mount-das.service`)
    - Controls power to the DAS via USB relay at `/dev/ttyUSB0`
    - Uses `bin/relay` Python script to send serial commands to power relay
-   - Uses `bin/await-block-devices` to wait for all 6 drives (by UUID) to appear
-   - Mounts 6 data drives to `/mnt/00`-`/mnt/05` (`/mnt/06` is retired: the
-     two failed 4TB HGSTs are gone and a 12TB WD took slot 05; `/mnt/07`, a
-     4TB Hitachi, was drained and pulled 2026-10-13)
+   - Uses `bin/await-block-devices` to wait for all 5 drives (by UUID) to appear
+   - Mounts 5 data drives to `/mnt/00`-`/mnt/03` and `/mnt/05` (`/mnt/06` is
+     retired: the two failed 4TB HGSTs are gone and a 12TB WD took slot 05;
+     `/mnt/07` and `/mnt/04`, 4TB Hitachis, were drained and pulled
+     2026-10-13 and 2026-10-19)
    - The DAS power supply is suspect: cold starts often need several relay
      attempts (drives drop ~3s after power-on, at spin-up) before all drives
      appear. Seen 2026-10-11 (4 tries) and 2026-10-13 (3 tries).
@@ -24,12 +25,12 @@ This repository contains configuration files and utilities for managing a Docker
 
 2. **Filesystem Unification** (`mergerfs.service`)
    - Depends on `mount-das.service`
-   - Merges the 6 branches (`/mnt/00`-`/mnt/05`) into `/mnt/merged`
+   - Merges the 5 branches (`/mnt/00`-`/mnt/03`, `/mnt/05`) into `/mnt/merged`
    - Uses `cache.files=partial` (critical for deluge's mmap usage)
    - Category create policy: `mspmfs` (existing path, most free space,
-     falling back to the nearest existing parent) while `/mnt/03` and `/mnt/04`
-     are NC (no-create) for `drain-branch`; back to `epmfs`
-     once they are retired
+     falling back to the nearest existing parent) while `/mnt/03`
+     is NC (no-create) for `drain-branch`; back to `epmfs`
+     once it is retired
    - `ExecStartPost` waits for `/mnt/merged` to actually be a mountpoint before
      dependants start
 
@@ -184,8 +185,9 @@ bin/mergerfs-hardlink-downloads --clean-tmp
 files of identical size will silently overwrite each other.
 
 - `drain-branch` - Empties retiring branches onto the rest of the pool, slowly,
-  so disks can be pulled (currently `/mnt/04`, `/mnt/03`: the remaining hot
-  7200 rpm drives; `/mnt/07` finished 2026-10-13 and was pulled). Run by `drain-branch.timer` (00:30 Mon-Fri) through
+  so disks can be pulled (currently `/mnt/03`: the last hot
+  7200 rpm drive; `/mnt/07` and `/mnt/04` finished 2026-10-13 and
+  2026-10-19 and were pulled). Run by `drain-branch.timer` (00:30 Mon-Fri) through
   `drain-branch.service`: 20 MiB/s, window 00:30-06:30, pauses rsync at 55°C (smartd warns at 55, cuts
   DAS power at 60; the drives idle at 47-52°C).
   Each run stops the five containers that mount `/mnt/merged` (deluge radarr
@@ -201,7 +203,7 @@ files of identical size will silently overwrite each other.
   containers stay down and new runs refuse until it is resolved.
 
   ```bash
-  bin/drain-branch /mnt/04 /mnt/03 -v    # dry-run plan
+  bin/drain-branch /mnt/03 -v    # dry-run plan
   journalctl -u drain-branch.service             # nightly progress
   ```
 

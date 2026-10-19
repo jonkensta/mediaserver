@@ -10,9 +10,10 @@ Type=oneshot
 # await-block-devices is given --timeout 180; the default 90s start timeout
 # would kill the unit before its own timeout could ever be reached.
 TimeoutStartSec=300
-# 6-drive layout since 2026-10: the two failed 4TB HGSTs (old /mnt/05 and
+# 5-drive layout since 2026-10: the two failed 4TB HGSTs (old /mnt/05 and
 # /mnt/06) are retired, a 12TB WD120EMFZ took the /mnt/05 slot (2026-08),
-# and /mnt/07 (Hitachi PBK9K9LS) was drained by drain-branch and pulled.
+# and /mnt/07 (Hitachi PBK9K9LS, 2026-10-13) and /mnt/04 (Hitachi PCHJ54EB,
+# 2026-10-19) were drained by drain-branch and pulled.
 ExecStart=/usr/local/bin/await-block-devices \
               --relay-device /dev/ttyUSB0 \
               --timeout 180 \
@@ -20,7 +21,6 @@ ExecStart=/usr/local/bin/await-block-devices \
               22d20912-fb50-4df7-ad58-6d9d7645e8af \
               1307fc22-3f19-4692-a547-c8325b96a30a \
               6184078e-d973-4894-b41d-bb03e18c8a4b \
-              019981e1-9a2c-4935-8d4f-7274379fbb04 \
               b93e6ac1-c300-4211-8ef8-da189bf3ae84
 # Mount failures must fail the unit so Restart=on-failure power-cycles the DAS.
 # The mountpoint guard keeps each line idempotent across retries.
@@ -28,7 +28,6 @@ ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/00 || mount -o noatime -U 348ed
 ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/01 || mount -o noatime -U 22d20912-fb50-4df7-ad58-6d9d7645e8af /mnt/01'
 ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/02 || mount -o noatime -U 1307fc22-3f19-4692-a547-c8325b96a30a /mnt/02'
 ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/03 || mount -o noatime -U 6184078e-d973-4894-b41d-bb03e18c8a4b /mnt/03'
-ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/04 || mount -o noatime -U 019981e1-9a2c-4935-8d4f-7274379fbb04 /mnt/04'
 ExecStartPost=/usr/bin/sh -c 'mountpoint -q /mnt/05 || mount -o noatime -U b93e6ac1-c300-4211-8ef8-da189bf3ae84 /mnt/05'
 # Re-register the DAS drives with smartd (thermal protection, /etc/smartd.conf):
 # smartd only opens devices at startup/reload, so drives that were absent then
