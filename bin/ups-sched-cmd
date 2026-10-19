@@ -1,0 +1,11 @@
+#!/bin/sh
+# upssched CMDSCRIPT (etc/nut/upssched.conf). Runs as the nut user.
+case "$1" in
+    onbatt-shutdown)
+        logger -t ups-sched-cmd "on battery for 5 minutes: forcing shutdown"
+        /usr/bin/upsmon -c fsd
+        ;;
+    *)
+        logger -t ups-sched-cmd "unrecognized timer: $1"
+        ;;
+esac

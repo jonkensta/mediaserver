@@ -71,7 +71,24 @@ This repository contains configuration files and utilities for managing a Docker
    - The script ignores every smartd warning type except `Temperature`
      (other failures are logged, not acted on).
 
-5. **Docker daemon stays independent of the DAS.** `docker.service` has no
+5. **UPS / power loss** (NUT, `etc/nut/` + `bin/ups-sched-cmd`)
+   - CyberPower CP850PFCLCDa on USB, NUT `standalone` (`nut.target`).
+   - Shutdown after 5 minutes on battery (`upssched` timer, cancelled when
+     mains returns), or earlier if charge < 50% / runtime < 10 min
+     (`ignorelb` + overrides in `ups.conf`). Either way it goes through
+     `upsmon` FSD → `shutdown -h`, which stops the DAS chain cleanly.
+   - Killpower: `POWERDOWNFLAG` makes the stock `nutshutdown` hook cut the
+     UPS outlets 60s after halt and restore them 120s after mains returns.
+     BIOS "AC power lost policy" is `Power on`, so the outlets returning
+     boots the machine. `POWEROFF_WAIT=5m` (nut.conf) reboots instead if mains
+     came back mid-shutdown and the UPS never cut power.
+   - `upsmon.conf` holds the upsd password, so it is not in the repo; the
+     additions are `NOTIFYCMD /usr/bin/upssched` and `NOTIFYFLAG
+     ONBATT|ONLINE SYSLOG+WALL+EXEC` (`POWERDOWNFLAG /etc/killpower` was
+     already set).
+   - Full test (power-cycles everything): `sudo upsmon -c fsd`.
+
+6. **Docker daemon stays independent of the DAS.** `docker.service` has no
    ordering or dependency on `mergerfs.service` (there used to be an
    `After=`/`Wants=` drop-in; it was removed because `After=` is satisfied by
    a *failed* mergerfs job too, so it never actually protected anything).
