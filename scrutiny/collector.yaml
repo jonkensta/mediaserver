@@ -18,8 +18,6 @@ devices:
     type: sat
   - device: /dev/sdc   # ST4000LM024 WCK0R0RL
     type: sat
-  - device: /dev/sdd   # HGST HUS724040ALE640 PK2338P4GXWMXC
-    type: sat
   - device: /dev/sde   # WDC WD120EMFZ 9RG714DC
     type: sat
   - device: /dev/nvme0n1
