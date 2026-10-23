@@ -409,6 +409,21 @@ services:
     networks:
       - mediaserver
 
+  austin-calendar:
+    build: ./austin-calendar/app
+    image: austin-calendar:local
+    container_name: austin-calendar
+    user: "1000:1000"
+    env_file: ./austin-calendar/.env
+    environment:
+      - TZ=America/Chicago
+      - PUBLIC_URL=https://calendar.jstarr.me
+    volumes:
+      - ./austin-calendar/data:/data
+    restart: on-failure
+    networks:
+      - mediaserver
+
   radioambulante:
     image: nginx:1.30-alpine
     container_name: radioambulante
