@@ -132,7 +132,7 @@ services:
       - mediaserver
 
   deluge:
-    image: lscr.io/linuxserver/deluge:2.2.0-r1-ls364
+    image: lscr.io/linuxserver/deluge:2.2.0-ls381
     container_name: deluge
     network_mode: "service:gluetun"
     environment:
@@ -171,6 +171,9 @@ services:
         target: /data/movies
         bind:
           create_host_path: false
+    ports:
+      # Client discovery on the LAN.
+      - 7359:7359/udp
     devices:
       - /dev/dri:/dev/dri
     restart: on-failure
@@ -430,6 +433,33 @@ services:
     volumes:
       - ./radioambulante/site:/usr/share/nginx/html:ro
       - ./radioambulante/conf:/etc/nginx/conf.d:ro
+    restart: on-failure
+    networks:
+      - mediaserver
+
+  # IBP website demo (ibp-backend + ibp-frontend from origin/main; see
+  # ibp/VERSIONS). Reached only through swag + Authelia at ibp.jstarr.me.
+  ibp-backend:
+    build: ./ibp/backend
+    image: ibp-backend:local
+    container_name: ibp-backend
+    environment:
+      - TZ=America/Chicago
+      - DATABASE_URL=sqlite+aiosqlite:////data/data.db
+    volumes:
+      - ./ibp/data:/data
+    restart: on-failure
+    networks:
+      - mediaserver
+
+  ibp:
+    build: ./ibp/frontend
+    image: ibp-frontend:local
+    container_name: ibp
+    volumes:
+      - ./ibp/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ibp-backend
     restart: on-failure
     networks:
       - mediaserver

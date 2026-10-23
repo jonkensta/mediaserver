@@ -33,7 +33,16 @@ access_control:
     # Only proxy-confs that include the authelia snippets ever consult this.
     # Jellyfin and FoundryVTT keep their native auth (their non-browser
     # clients cannot follow a forward-auth redirect), so they never match.
+    - domain: 'radioambulante.jstarr.me'
+      subject: 'group:radioambulante'
+      # Low-stakes app for a non-technical user: password only.
+      policy: 'one_factor'
+    - domain: 'calendar.jstarr.me'
+      subject: 'group:calendar'
+      # Read-only guests of the calendar (the app gates votes to jstarr): password only.
+      policy: 'one_factor'
     - domain: '*.jstarr.me'
+      subject: 'group:admins'
       policy: 'two_factor'
 
 session:
