@@ -464,6 +464,39 @@ services:
     networks:
       - mediaserver
 
+  # Health dashboard (~/Source/health on pop-os, copied to ./health/app).
+  # Reached only through swag + Authelia at health.jstarr.me.
+  health:
+    build: ./health/app
+    image: health:local
+    container_name: health
+    user: "1000:1000"
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - ./health/data:/data
+    restart: on-failure
+    networks:
+      - mediaserver
+
+  # Reads the Renpho scale through the ESP32 bluetooth_proxy at
+  # 192.168.1.111 (static lease on the router) and posts to health.
+  health-collector:
+    image: health:local
+    container_name: health-collector
+    user: "1000:1000"
+    command: ["python", "collector.py"]
+    env_file: ./health/.env
+    environment:
+      - TZ=America/Chicago
+      - HEALTH_URL=http://health:8080
+      - ESPHOME_PROXY=192.168.1.111
+    depends_on:
+      - health
+    restart: on-failure
+    networks:
+      - mediaserver
+
 networks:
   # Shared with docker-compose.pihole.yml, so it is created out-of-band:
   #   docker network create mediaserver
