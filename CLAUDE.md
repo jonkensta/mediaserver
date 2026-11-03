@@ -102,7 +102,7 @@ This repository contains configuration files and utilities for managing a Docker
 
 - **VPN Routing**: Deluge traffic routes through Gluetun VPN container using `network_mode: "service:gluetun"`
   - This affects reverse proxy setup: deluge's nginx config must set `upstream_app` to `gluetun` instead of `deluge`
-- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 15 services (austin-calendar, bazarr, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
+- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 16 services (austin-calendar, bazarr, bookportal, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
 - **Forward Auth**: Authelia sits in front of the browser-facing admin UIs via SWAG's `auth_request` snippets (see the Authelia section below). Jellyfin and FoundryVTT keep their native auth only.
 - **Two networks**: `frontend` (compose-managed) holds the internet-facing tier — swag and endlessh. `mediaserver` (external, shared with the pihole compose file) holds everything else. `swag` is the only container on both, bridging TLS termination to the backend. `endlessh` is frontend-only, so a compromise there cannot reach Deluge RPC, the \*arr APIs, or Gluetun's control server. This limits blast radius but is not auth: a proxy-conf without auth still exposes an admin UI.
 - **Service Communication**: Non-host-mode containers communicate via Docker DNS using container names
@@ -398,6 +398,19 @@ fast-forwards the clone and rebuilds.
   follow a forward-auth redirect. The token is the credential, as with
   healthchecks' `/ping/`. The location regex matches only that path.
 - Manual refresh: `docker exec austin-calendar node dist/cli.js`.
+
+### Book Portal mock (IBP extension demo)
+
+Public mock of the TDCJ Book Portal shipment pages at `bookportal.jstarr.me`,
+used to demo and test the IBP book-portal browser extension. **No Authelia on
+purpose**: it holds only made-up inmates and keeps at most 200 shipments in
+memory (a restart or its "Reset demo" button wipes them). Source is
+`mock-portal/` in the private repo `github.com/jonkensta/ibp-book-portal-extension`;
+`/opt/mediaserver/bookportal/app` is a git clone and the compose service
+builds `./bookportal/app/mock-portal` (stdlib Python, read-only container,
+runs as nobody). Deploy with that repo's `deploy/deploy.sh`, the same pattern
+as whisker. The clone needs GitHub auth to fetch (agent forwarding, or this
+host's key once Bitwarden is unlocked).
 
 ### FoundryVTT
 

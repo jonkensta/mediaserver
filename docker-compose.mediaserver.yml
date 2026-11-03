@@ -412,6 +412,20 @@ services:
     networks:
       - mediaserver
 
+  # Mock TDCJ Book Portal for demos/testing of the IBP book-portal extension
+  # (github.com/jonkensta/ibp-book-portal-extension, cloned to ./bookportal/app).
+  # Public at bookportal.jstarr.me, no Authelia: fake data only, in memory.
+  bookportal:
+    build: ./bookportal/app/mock-portal
+    image: bookportal:local
+    container_name: bookportal
+    read_only: true
+    environment:
+      - TZ=America/Chicago
+    restart: on-failure
+    networks:
+      - mediaserver
+
   austin-calendar:
     build: ./austin-calendar/app
     image: austin-calendar:local
