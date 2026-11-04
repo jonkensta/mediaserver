@@ -422,6 +422,11 @@ services:
     read_only: true
     environment:
       - TZ=America/Chicago
+      - FIREFOX_DIR=/firefox
+    volumes:
+      # Signed Firefox add-ons (contain API keys; rsynced by the extension
+      # repo's deploy/sign-firefox.sh, never in git).
+      - ./bookportal/firefox:/firefox:ro
     restart: on-failure
     networks:
       - mediaserver
