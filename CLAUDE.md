@@ -375,6 +375,9 @@ workstation, github.com/jonkensta/radioambulante-study); episodes are built ther
   `default.conf` is seen by `nginx -s reload`.
 - Audio files carry a content hash in their name and are cached privately for
   30 days; `index.html` and `data/` are `no-cache`.
+- The icons and `manifest.webmanifest` **bypass Authelia** in
+  `swag/proxy-confs/radioambulante.subdomain.conf`: browsers fetch the manifest
+  without cookies, so behind auth, home-screen shortcuts get a blank icon.
 
 ### Austin Calendar (events calendar with Claude picks)
 
