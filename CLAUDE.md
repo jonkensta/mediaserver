@@ -102,7 +102,7 @@ This repository contains configuration files and utilities for managing a Docker
 
 - **VPN Routing**: Deluge traffic routes through Gluetun VPN container using `network_mode: "service:gluetun"`
   - This affects reverse proxy setup: deluge's nginx config must set `upstream_app` to `gluetun` instead of `deluge`
-- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 16 services (austin-calendar, bazarr, bookportal, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
+- **Reverse Proxy**: SWAG handles SSL termination and reverse proxying for 17 services (austin-calendar, bazarr, bookportal, deluge, foundryvtt, healthchecks, heimdall, jellyfin, kimai, memos, pihole, prowlarr, radarr, radioambulante, scrutiny, sonarr, whisker), plus the Authelia portal
 - **Forward Auth**: Authelia sits in front of the browser-facing admin UIs via SWAG's `auth_request` snippets (see the Authelia section below). Jellyfin and FoundryVTT keep their native auth only.
 - **Two networks**: `frontend` (compose-managed) holds the internet-facing tier — swag and endlessh. `mediaserver` (external, shared with the pihole compose file) holds everything else. `swag` is the only container on both, bridging TLS termination to the backend. `endlessh` is frontend-only, so a compromise there cannot reach Deluge RPC, the \*arr APIs, or Gluetun's control server. This limits blast radius but is not auth: a proxy-conf without auth still exposes an admin UI.
 - **Service Communication**: Non-host-mode containers communicate via Docker DNS using container names
@@ -288,6 +288,19 @@ Key invariants:
   browser admin UIs: bazarr, deluge, heimdall, kimai, pihole, prowlarr, radarr,
   sonarr (and lidarr/navidrome if enabled). The `/api` location blocks in the
   \*arr confs deliberately stay outside Authelia so API-key clients keep working.
+- **OIDC provider**: `identity_providers.oidc` serves apps with their own
+  login (currently Memos). Issuer `https://authelia.jstarr.me/authelia`.
+  Secrets in `/opt/mediaserver/authelia/oidc/` (mode 0640, group media):
+  `hmac_secret` (via `AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE`),
+  `jwks_rsa.key`, and `<client>_client_secret.digest`. The config pulls them
+  in with Authelia's template filter (`X_AUTHELIA_CONFIG_FILTERS=template`).
+  That filter parses the **whole file, comments included**, so a stray
+  double brace in a comment breaks startup. Validate before restarting:
+  `docker run --rm -u 1012:1012 -v /opt/mediaserver/authelia:/config -e
+  AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE=/config/smtp_password -e
+  AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/config/oidc/hmac_secret
+  -e X_AUTHELIA_CONFIG_FILTERS=template authelia/authelia:4.39 authelia
+  validate-config --config /config/configuration.yml`.
 - Do **not** protect jellyfin or foundryvtt: their native mobile/TV/player
   clients cannot follow a forward-auth redirect and would break. They keep
   their own login.
@@ -401,6 +414,40 @@ fast-forwards the clone and rebuilds.
   follow a forward-auth redirect. The token is the credential, as with
   healthchecks' `/ping/`. The location regex matches only that path.
 - Manual refresh: `docker exec austin-calendar node dist/cli.js`.
+
+### Memos (quick notes, Google Keep replacement)
+
+Memos (`neosmemo/memos`, upstream github.com/usememos/memos) at
+`notes.jstarr.me`. Single Go binary, SQLite at `/opt/mediaserver/memos/data`
+(`memos_prod.db` plus attachments). Pinned to a release tag: read the upstream
+release notes before bumping, since some releases carry schema migrations
+(back up `memos/data` first). REST lives under `/api/...` (`/api/v1` was
+removed in 26.x) and there is a built-in MCP server at `/mcp`.
+
+- Runs as `1000:1000` (jstarr) via `MEMOS_UID`/`MEMOS_GID`: the entrypoint
+  starts as root, chowns `/var/opt/memos`, then drops privileges.
+- `MEMOS_INSTANCE_URL=https://notes.jstarr.me`. Trusted proxies default to
+  the private ranges, so SWAG's forwarding headers are honoured.
+- **No forward auth.** Authelia is Memos' login instead: OIDC client
+  `memos` in `authelia/configuration.yml` (policy `admins_two_factor`), set
+  up in Memos as the identity provider "Authelia" with `sub` as the
+  identifier. In Memos settings, registration and password login are both
+  disabled, so SSO is the only way to sign in. Phone apps, scripts and MCP
+  clients use Memos personal access tokens, so nothing needs to bypass a
+  proxy gate.
+- **Except sign-in**: Memos exempts admins from "disallow password auth"
+  (lockout protection), so `notes.subdomain.conf` puts just the SignIn
+  endpoints (`/api/auth/signin`, `/memos.api.AuthService/SignIn`) behind
+  Authelia forward auth. The SSO flow already has an Authelia session there;
+  a bare password attempt is redirected away.
+- An SSO login only signs in to an existing Memos account if that account
+  has linked the Authelia identity (Settings, while signed in). With
+  registration disabled, an unlinked Authelia user is refused rather than
+  given a new account.
+- If SSO breaks and you need password login back:
+  `sqlite3 /opt/mediaserver/memos/data/memos_prod.db` is the escape hatch
+  (stop the container first), or temporarily re-enable it through the API
+  with an admin access token.
 
 ### Book Portal mock (IBP extension demo)
 

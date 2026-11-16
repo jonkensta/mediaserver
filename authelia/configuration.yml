@@ -45,6 +45,47 @@ access_control:
       subject: 'group:admins'
       policy: 'two_factor'
 
+# OpenID Connect provider (SSO for apps with native login, e.g. Memos).
+# Secrets live in /config/oidc/ (mode 0640, group media), outside this repo:
+#   hmac_secret                 - AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE
+#   jwks_rsa.key                - RSA 2048 signing key (authelia crypto pair rsa generate)
+#   <client>_client_secret.digest - pbkdf2-sha512 digest of the client secret
+#                                   (authelia crypto hash generate pbkdf2 --random)
+# The "secret" template lines below need X_AUTHELIA_CONFIG_FILTERS=template (compose
+# env). Never write double braces in a comment here: the template engine parses
+# comments too.
+# Issuer: https://authelia.jstarr.me/authelia
+identity_providers:
+  oidc:
+    jwks:
+      - key_id: 'main'
+        algorithm: 'RS256'
+        use: 'sig'
+        key: {{ secret "/config/oidc/jwks_rsa.key" | mindent 10 "|" | msquote }}
+    authorization_policies:
+      admins_two_factor:
+        default_policy: 'deny'
+        rules:
+          - subject: 'group:admins'
+            policy: 'two_factor'
+    clients:
+      # Memos (notes.jstarr.me). Memos uses sub as the linked identity; password
+      # login is disabled in Memos, so this is the only way in.
+      - client_id: 'memos'
+        client_name: 'Memos'
+        client_secret: {{ secret "/config/oidc/memos_client_secret.digest" | msquote }}
+        public: false
+        authorization_policy: 'admins_two_factor'
+        consent_mode: 'implicit'
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+        redirect_uris:
+          - 'https://notes.jstarr.me/auth/callback'
+        scopes: ['openid', 'profile', 'email']
+        response_types: ['code']
+        grant_types: ['authorization_code']
+        token_endpoint_auth_method: 'client_secret_basic'
+
 session:
   secret: 'YOUR_AUTHELIA_SESSION_SECRET'
   cookies:

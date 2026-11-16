@@ -269,6 +269,9 @@ services:
     environment:
       - TZ=America/Chicago
       - AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE=/config/smtp_password
+      - AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/config/oidc/hmac_secret
+      # Enables the 'secret' template lines in configuration.yml.
+      - X_AUTHELIA_CONFIG_FILTERS=template
     volumes:
       - ./authelia:/config
     restart: on-failure
@@ -512,6 +515,27 @@ services:
       - ESPHOME_PROXY=192.168.1.111
     depends_on:
       - health
+    restart: on-failure
+    networks:
+      - mediaserver
+
+  # Memos (github.com/usememos/memos): Keep-style quick notes at
+  # notes.jstarr.me. SQLite in ./memos/data. The UI is behind Authelia;
+  # /api/, /mcp and /file/ bypass it for access-token clients (Memos checks
+  # the token itself).
+  memos:
+    image: neosmemo/memos:26.11.1
+    container_name: memos
+    environment:
+      - TZ=America/Chicago
+      # The entrypoint starts as root, chowns /var/opt/memos to this UID:GID,
+      # then drops privileges.
+      - MEMOS_UID=1000
+      - MEMOS_GID=1000
+      - MEMOS_PORT=5230
+      - MEMOS_INSTANCE_URL=https://notes.jstarr.me
+    volumes:
+      - ./memos/data:/var/opt/memos
     restart: on-failure
     networks:
       - mediaserver
