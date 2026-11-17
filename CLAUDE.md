@@ -288,6 +288,11 @@ Key invariants:
   browser admin UIs: bazarr, deluge, heimdall, kimai, pihole, prowlarr, radarr,
   sonarr (and lidarr/navidrome if enabled). The `/api` location blocks in the
   \*arr confs deliberately stay outside Authelia so API-key clients keep working.
+- Radarr, Sonarr and Prowlarr use `AuthenticationMethod` `External` and
+  Bazarr `auth.type: null`: their own logins are off, so **Authelia is their
+  only gate**. Never drop the Authelia includes from their proxy-confs or
+  publish their ports. Edit those configs with the container stopped (the
+  apps rewrite them on shutdown).
 - **OIDC provider**: `identity_providers.oidc` serves apps with their own
   login (currently Memos). Issuer `https://authelia.jstarr.me/authelia`.
   Secrets in `/opt/mediaserver/authelia/oidc/` (mode 0640, group media):
