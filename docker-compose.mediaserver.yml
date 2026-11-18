@@ -520,9 +520,9 @@ services:
       - mediaserver
 
   # Memos (github.com/usememos/memos): Keep-style quick notes at
-  # notes.jstarr.me. SQLite in ./memos/data. The UI is behind Authelia;
-  # /api/, /mcp and /file/ bypass it for access-token clients (Memos checks
-  # the token itself).
+  # notes.jstarr.me. SQLite in ./memos/data. No forward auth: Authelia is
+  # Memos' OIDC login, and API/MCP clients use Memos access tokens. Only the
+  # password SignIn endpoints sit behind Authelia (see notes.subdomain.conf).
   memos:
     image: neosmemo/memos:26.11.1
     container_name: memos
