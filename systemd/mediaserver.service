@@ -16,7 +16,9 @@ WorkingDirectory=/opt/mediaserver
 TimeoutStartSec=1800
 # The compose file declares this network as external, so it must already exist.
 ExecStartPre=-/usr/bin/docker network create mediaserver
-ExecStartPre=-/usr/bin/docker compose pull
+# --ignore-buildable: the *:local images (whisker, bookportal, austin-calendar,
+# health) are built here and have no registry to pull from.
+ExecStartPre=-/usr/bin/docker compose pull --ignore-buildable
 ExecStart=/usr/bin/docker compose up --remove-orphans
 ExecStop=/usr/bin/docker compose down
 ExecReload=/usr/bin/docker compose up -d --remove-orphans

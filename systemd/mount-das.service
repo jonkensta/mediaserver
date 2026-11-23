@@ -43,7 +43,10 @@ ExecStartPost=-/usr/bin/systemctl try-reload-or-restart smartd.service
 # until TimeoutStartSec fires and takes the whole DAS chain down with it.
 # Skipping at boot is harmless: scrutiny has not started yet, so it gets fresh
 # device nodes anyway.
-ExecStartPost=-/usr/bin/sh -c '/usr/bin/systemctl is-active --quiet docker.service && /usr/bin/docker restart scrutiny'
+# Also only when the container exists. dockerd can already be up at boot
+# (pihole starts it) before mediaserver has created scrutiny, and "docker
+# restart" then logs a "No such container" failure on every boot.
+ExecStartPost=-/usr/bin/sh -c 'if /usr/bin/systemctl is-active --quiet docker.service && /usr/bin/docker container inspect scrutiny >/dev/null 2>&1; then /usr/bin/docker restart scrutiny; fi'
 # Re-queue the rest of the chain. Restart=on-failure re-runs only this unit:
 # when the DAS misses the boot-time window, the boot jobs for mergerfs and
 # mediaserver fail with result 'dependency' and nothing re-creates them once a
