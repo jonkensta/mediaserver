@@ -108,7 +108,10 @@ services:
       - mediaserver
 
   gluetun:
-    image: qmcgaw/gluetun
+    # Pinned to a release: `latest` is a rolling dev build, and the 2026-11-19
+    # one broke PIA port forwarding (x509 name mismatch on the PF API), after
+    # which gluetun exited 0 and took Deluge offline for 4 days.
+    image: qmcgaw/gluetun:v3.41.3
     container_name: gluetun
     cap_add:
       - NET_ADMIN
@@ -505,6 +508,8 @@ services:
   # 192.168.1.111 (static lease on the router) and posts to health.
   health-collector:
     image: health:local
+    # Built by the health service above; there is no registry to pull it from.
+    pull_policy: never
     container_name: health-collector
     user: "1000:1000"
     command: ["python", "collector.py"]
